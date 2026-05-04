@@ -200,7 +200,10 @@ copy_private_headers() {
     echo "${GREEN}Copying private headers...${NC}"
     mkdir -p "$OUTPUT_INCLUDES"
     cp -r "$IOKIT_HEADERS_PATH" "$OUTPUT_INCLUDES/IOKit"
-    rm "$OUTPUT_INCLUDES/IOKit/storage/IOMedia.h" # needed to pass QEMU check
+    # IOMedia.h needs to disappear so QEMU's autodetect skips its IOMedia
+    # codepath. Apple removed the header outright in the macOS 26 SDK, so
+    # `rm` without -f trips on builds against newer SDKs.
+    rm -f "$OUTPUT_INCLUDES/IOKit/storage/IOMedia.h"
     # patch headers
     LC_ALL=C sed -i '' -e 's/#if KERNEL_USER32/#if 0/g' $(find "$OUTPUT_INCLUDES/IOKit" -type f)
     LC_ALL=C sed -i '' -e 's/#if !KERNEL_USER32/#if 1/g' $(find "$OUTPUT_INCLUDES/IOKit" -type f)
