@@ -199,7 +199,12 @@ copy_private_headers() {
     fi
     echo "${GREEN}Copying private headers...${NC}"
     mkdir -p "$OUTPUT_INCLUDES"
-    cp -r "$IOKIT_HEADERS_PATH" "$OUTPUT_INCLUDES/IOKit"
+    # -L: dereference the source symlink. In macOS 26 SDK,
+    # IOKit.framework/Headers is itself a symlink (-> Versions/Current/Headers).
+    # Without -L the destination becomes a broken symlink and the sed -i
+    # passes below get an empty file list ("sed: -I or -i may not be used
+    # with stdin").
+    cp -rL "$IOKIT_HEADERS_PATH" "$OUTPUT_INCLUDES/IOKit"
     # IOMedia.h needs to disappear so QEMU's autodetect skips its IOMedia
     # codepath. Apple removed the header outright in the macOS 26 SDK, so
     # `rm` without -f trips on builds against newer SDKs.
