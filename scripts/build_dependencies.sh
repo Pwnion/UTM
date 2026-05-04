@@ -629,6 +629,11 @@ build_angle () {
     export PATH="$(realpath "$BUILD_DIR/depot_tools.git"):$OLD_PATH"
     pwd="$(pwd)"
     cd "$BUILD_DIR/WebKit.git/Source/ThirdParty/ANGLE"
+    # GCC_TREAT_WARNINGS_AS_ERRORS=NO: WebKit's vendored ANGLE pins to a
+    # commit that predates several clang warnings now enabled by default
+    # (e.g. virtual dtor on a `final` class) — building with -Werror
+    # against macOS 26 SDK / clang 17+ stalls on those. We're consuming
+    # ANGLE as a binary, not maintaining it, so demote -Werror.
     env -i PATH=$PATH xcodebuild archive -archivePath "ANGLE" \
                                          -scheme "ANGLE" \
                                          -sdk $SDK \
@@ -637,6 +642,7 @@ build_angle () {
                                          WEBCORE_LIBRARY_DIR="/usr/local/lib" \
                                          NORMAL_UMBRELLA_FRAMEWORKS_DIR="" \
                                          CODE_SIGNING_ALLOWED=NO \
+                                         GCC_TREAT_WARNINGS_AS_ERRORS=NO \
                                          IPHONEOS_DEPLOYMENT_TARGET="14.0" \
                                          MACOSX_DEPLOYMENT_TARGET="11.0" \
                                          XROS_DEPLOYMENT_TARGET="1.0"
