@@ -117,7 +117,11 @@ download () {
     fi
     if [ -d "$DATA" ]; then
         echo "${GREEN}Patching data ${NAME}...${NC}"
-        cp -r "$DATA/" "$DIR"
+        # `cp -r src/. dst` rather than `cp -r src/ dst`: BSD cp on macOS
+        # ignores the trailing slash on source, so `src/` ends up nested
+        # AS a subdir of dst instead of having its contents merged.
+        # `src/.` works correctly under both BSD and GNU cp.
+        cp -r "$DATA/." "$DIR"
     fi
 }
 
