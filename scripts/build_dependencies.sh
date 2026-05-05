@@ -995,7 +995,13 @@ macos )
     SDK=macosx
     CFLAGS_TARGET="-target $ARCH-apple-macos$SDKMINVER"
     PLATFORM_FAMILY_NAME="macOS"
-    QEMU_PLATFORM_BUILD_FLAGS="--enable-shared-lib --disable-cocoa --cpu=$CPU"
+    # --disable-sdl: when shared-lib QEMU is auto-configured with SDL2
+    # (because Homebrew has sdl2 installed as a transitive dep), ui/sdl2.c
+    # references the `qemu_main` entry point which the loader app (UTM)
+    # is supposed to provide. UTM uses its own Cocoa/SPICE display path
+    # and never satisfies that reference, so the linker fails. Disable
+    # SDL outright.
+    QEMU_PLATFORM_BUILD_FLAGS="--enable-shared-lib --disable-cocoa --disable-sdl --cpu=$CPU"
     ;;
 * )
     usage
