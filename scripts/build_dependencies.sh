@@ -213,6 +213,15 @@ copy_private_headers() {
     # codepath. Apple removed the header outright in the macOS 26 SDK, so
     # `rm` without -f trips on builds against newer SDKs.
     rm -f "$OUTPUT_INCLUDES/IOKit/storage/IOMedia.h"
+    # IOPMLibDefs.h gained `enum IOPMUserClientNotificationType` in the
+    # macOS 26 SDK. When UTM's Swift target builds the IOKit module, the
+    # framework version is included via Headers/pwr_mgt/IOPMLibDefs.h, AND
+    # our sysroot copy is included via <IOKit/pwr_mgt/IOPMLibDefs.h> off
+    # IOPMLib.h. clang then sees the enum twice and errors with
+    # "redefinition of 'IOPMUserClientNotificationType'". Dropping our
+    # copy makes the angle-bracket include fall through to the framework
+    # version, dedup'ing the enum.
+    rm -f "$OUTPUT_INCLUDES/IOKit/pwr_mgt/IOPMLibDefs.h"
     # patch headers
     LC_ALL=C sed -i '' -e 's/#if KERNEL_USER32/#if 0/g' $(find "$OUTPUT_INCLUDES/IOKit" -type f)
     LC_ALL=C sed -i '' -e 's/#if !KERNEL_USER32/#if 1/g' $(find "$OUTPUT_INCLUDES/IOKit" -type f)
