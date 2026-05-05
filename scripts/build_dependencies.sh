@@ -804,10 +804,21 @@ build_mesa_host () {
 
 build_vulkan_drivers () {
     mkdir -p "$PREFIX/share/vulkan/icd.d"
-    build_mesa_host
-    meson_darwin_build $MESA_REPO -Dmesa-clc=system -Dgallium-drivers= -Dvulkan-drivers=kosmickrisp -Dplatforms=macos
-    patch_vulkan_icd "$PREFIX/share/vulkan/icd.d/kosmickrisp_mesa_icd.$ARCH.json"
-    mv "$PREFIX/share/vulkan/icd.d/kosmickrisp_mesa_icd.$ARCH.json" "$PREFIX/share/vulkan/icd.d/kosmickrisp_mesa_icd.json"
+    # Mesa's kosmickrisp Vulkan driver is temporarily disabled here.
+    # mesa-clc (used by build_mesa_host) does not compile against LLVM 22+
+    # because of API changes — clang::driver::Driver::GetResourcesPath was
+    # moved out of the Driver class, and OffloadArch::UNUSED collides with
+    # mesa's `#define UNUSED __attribute__((unused))` macro. UTM CI built
+    # against an older LLVM (18-ish) so it never hit this.
+    #
+    # MoltenVK alone provides a working Vulkan-on-Metal path; kosmickrisp
+    # is a faster alternative but optional. Re-enable once mesa is bumped
+    # to a commit that knows about modern clang/LLVM, or once we pin the
+    # mesa build to llvm@19 explicitly.
+    #build_mesa_host
+    #meson_darwin_build $MESA_REPO -Dmesa-clc=system -Dgallium-drivers= -Dvulkan-drivers=kosmickrisp -Dplatforms=macos
+    #patch_vulkan_icd "$PREFIX/share/vulkan/icd.d/kosmickrisp_mesa_icd.$ARCH.json"
+    #mv "$PREFIX/share/vulkan/icd.d/kosmickrisp_mesa_icd.$ARCH.json" "$PREFIX/share/vulkan/icd.d/kosmickrisp_mesa_icd.json"
     build_moltenvk
     patch_vulkan_icd "$PREFIX/share/vulkan/icd.d/MoltenVK_icd.json"
 }
