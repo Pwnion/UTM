@@ -306,7 +306,11 @@ extension VMDisplayQemuMetalWindowController {
         let currentScreenScale = window.screen?.backingScaleFactor ?? 1.0
         let nativeScale = displayConfig!.isNativeResolution ? 1.0 : currentScreenScale
         let minScaledSize = CGSize(width: displaySize.width * nativeScale / currentScreenScale, height: displaySize.height * nativeScale / currentScreenScale)
-        guard let screenSize = window.screen?.visibleFrame.size else {
+        // In fullscreen, use the full screen frame (including the notch wings)
+        // rather than visibleFrame, which excludes the menu-bar/notch region.
+        // Pairs with NSPrefersDisplaySafeAreaCompatibilityMode=false in Info.plist.
+        let availableFrame = isFullScreen ? window.screen?.frame : window.screen?.visibleFrame
+        guard let screenSize = availableFrame?.size else {
             return minScaledSize
         }
         let excessSize = window.frameRect(forContentRect: .zero).size
@@ -349,7 +353,12 @@ extension VMDisplayQemuMetalWindowController {
         guard displaySize != .zero else { return frameSize }
         guard let vmDisplay = self.vmDisplay else { return frameSize }
         let currentScreenScale = window.screen?.backingScaleFactor ?? 1.0
-        let targetContentSize = window.contentRect(forFrameRect: CGRect(origin: .zero, size: frameSize)).size
+        // In fullscreen, use the raw frame size — `contentRect(forFrameRect:)`
+        // still subtracts toolbar height even when the toolbar is auto-hidden,
+        // which letterboxes the framebuffer (LR black bars from height-fit
+        // scaling). Outside fullscreen the toolbar is genuinely visible and
+        // contentRect is the right answer.
+        let targetContentSize = isFullScreen ? frameSize : window.contentRect(forFrameRect: CGRect(origin: .zero, size: frameSize)).size
         let targetScaleX = targetContentSize.width * currentScreenScale / displaySize.width
         let targetScaleY = targetContentSize.height * currentScreenScale / displaySize.height
         let targetScale = min(targetScaleX, targetScaleY)
@@ -419,13 +428,26 @@ extension VMDisplayQemuMetalWindowController {
     
     func windowDidEnterFullScreen(_ notification: Notification) {
         isFullScreen = true
+        // WingsAwareWindow.enterFakeFullScreen has already cleared
+        // contentAspectRatio/contentMinSize and resized the window to
+        // screen.frame. Re-run scaling now that isFullScreen is true so
+        // updateHostScaling uses the new (frame-not-contentRect) branch.
+        if let window = self.window, displaySize != .zero {
+            _ = updateHostScaling(for: window, frameSize: window.frame.size)
+        }
         if isFullScreenAutoCapture {
             captureMouse()
         }
     }
-    
+
     func windowDidExitFullScreen(_ notification: Notification) {
         isFullScreen = false
+        // Repopulate contentMinSize/contentAspectRatio from the guest's
+        // current resolution; WingsAwareWindow restored the pre-fullscreen
+        // values which may be stale if the guest resized during fullscreen.
+        if let vmDisplay = self.vmDisplay {
+            displaySizeDidChange(size: vmDisplay.displaySize, shouldSaveResolution: false)
+        }
         if isFullScreenAutoCapture {
             releaseMouse()
         }
@@ -435,7 +457,7 @@ extension VMDisplayQemuMetalWindowController {
         // Do not capture mouse if user did not clicked inside the metalView because the window will be draged if user hold the mouse button.
         guard let window = window,
               window.mouseLocationOutsideOfEventStream.y < metalView.frame.height,
-              captureMouseToolbarButton.state == .off,
+              (captureMouseToolbarButton?.state ?? .off) == .off,
               isWindowFocusAutoCapture else {
             return
         }
@@ -499,7 +521,7 @@ extension VMDisplayQemuMetalWindowController: VMMetalViewInputDelegate {
             self.qemuVM.requestInputTablet(false)
             self.metalView?.captureMouse()
             
-            self.captureMouseToolbarButton.state = .on
+            self.captureMouseToolbarButton?.state = .on
             
             let format = NSLocalizedString("Press %@ to release cursor", comment: "VMDisplayQemuMetalWindowController")
             let keys = NSLocalizedString(self.shouldUseCmdOptForCapture ? "⌘+⌥" : "⌃+⌥", comment: "VMDisplayQemuMetalWindowController")
@@ -535,7 +557,7 @@ extension VMDisplayQemuMetalWindowController: VMMetalViewInputDelegate {
         syncCapsLock()
         qemuVM.requestInputTablet(true)
         metalView?.releaseMouse()
-        self.captureMouseToolbarButton.state = .off
+        self.captureMouseToolbarButton?.state = .off
         self.window?.subtitle = defaultSubtitle
     }
     
@@ -731,5 +753,106 @@ extension VMDisplayQemuMetalWindowController {
         let sheetWindow = NSWindow(contentViewController: content)
         sheetWindow.setContentSize(fittingSize)
         window.beginSheet(sheetWindow)
+    }
+}
+
+// Custom NSWindow class declared as customClass on VMDisplayWindow.xib.
+//
+// Native AppKit fullscreen hosts the window's contentView in a managed
+// compositing container that's sized to visibleFrame regardless of
+// window.frame, with no public API to override. On a 16" MBP that means
+// the menu-bar/notch-wings region (~33pt at the top) is permanently
+// unreachable from the guest framebuffer.
+//
+// Instead of relying on native fullscreen, override toggleFullScreen to
+// implement "fake fullscreen": .borderless styleMask, frame = screen.frame,
+// auto-hide menu bar + dock. We fire windowDidEnter/ExitFullScreen on the
+// delegate manually so the controller's fullscreen lifecycle (isFullScreen
+// flag, mouse capture, scaling re-calc) runs unchanged.
+@objc(WingsAwareWindow)
+class WingsAwareWindow: NSWindow {
+    private var savedFrame: NSRect = .zero
+    private var savedStyleMask: NSWindow.StyleMask = []
+    private var savedPresentationOptions: NSApplication.PresentationOptions = []
+    private var savedContentAspectRatio: NSSize = .zero
+    private var savedContentMinSize: NSSize = .zero
+    private var savedBackgroundColor: NSColor?
+    private var savedHasShadow: Bool = true
+    private(set) var isFakeFullScreen: Bool = false
+
+    // Borderless windows can't accept key/main without these overrides.
+    override var canBecomeKey: Bool { true }
+    override var canBecomeMain: Bool { true }
+
+    override func toggleFullScreen(_ sender: Any?) {
+        if isFakeFullScreen {
+            exitFakeFullScreen()
+        } else {
+            enterFakeFullScreen()
+        }
+    }
+
+    private func enterFakeFullScreen() {
+        guard let screen = self.screen else { return }
+        savedFrame = self.frame
+        savedStyleMask = self.styleMask
+        savedPresentationOptions = NSApp.presentationOptions
+        savedContentAspectRatio = self.contentAspectRatio
+        savedContentMinSize = self.contentMinSize
+        savedBackgroundColor = self.backgroundColor
+        savedHasShadow = self.hasShadow
+
+        // updateHostFrame leaves contentAspectRatio/contentMinSize set to
+        // the guest's resolution; setFrame(screen.frame) on a constrained
+        // window asserts in _adjustNeedsDisplayRegionForNewFrame.
+        self.contentAspectRatio = .zero
+        self.contentMinSize = .zero
+
+        self.styleMask = [.borderless, .resizable]
+        // Black backing so any subpixel-alignment gap doesn't expose the
+        // default light-grey window backing.
+        self.backgroundColor = .black
+        // The window shadow's inner edge bleeds 1-2px onto screen pixels
+        // when the frame == screen.frame; visible as a grey halo.
+        self.hasShadow = false
+        NSApp.presentationOptions = [.autoHideMenuBar, .autoHideDock]
+        super.setFrame(screen.frame, display: true)
+        self.makeKeyAndOrderFront(nil)
+        isFakeFullScreen = true
+
+        let n = Notification(name: NSWindow.didEnterFullScreenNotification, object: self)
+        (delegate as? NSWindowDelegate)?.windowDidEnterFullScreen?(n)
+    }
+
+    private func exitFakeFullScreen() {
+        let n = Notification(name: NSWindow.didExitFullScreenNotification, object: self)
+        (delegate as? NSWindowDelegate)?.windowDidExitFullScreen?(n)
+
+        NSApp.presentationOptions = savedPresentationOptions
+        self.styleMask = savedStyleMask
+        self.backgroundColor = savedBackgroundColor
+        self.hasShadow = savedHasShadow
+        super.setFrame(savedFrame, display: true)
+        self.contentAspectRatio = savedContentAspectRatio
+        self.contentMinSize = savedContentMinSize
+        isFakeFullScreen = false
+    }
+
+    // Force any setFrame call while in fake-fullscreen to stay at
+    // screen.frame so external resizes don't shrink us.
+    override func setFrame(_ frameRect: NSRect, display flag: Bool, animate animateFlag: Bool) {
+        var rect = frameRect
+        if isFakeFullScreen, let screen = self.screen {
+            rect = screen.frame
+        }
+        super.setFrame(rect, display: flag, animate: animateFlag)
+    }
+
+    override func setFrame(_ frameRect: NSRect, display flag: Bool) {
+        var rect = frameRect
+        if isFakeFullScreen, let screen = self.screen {
+            rect = screen.frame
+        }
+        super.setFrame(rect, display: flag)
     }
 }
