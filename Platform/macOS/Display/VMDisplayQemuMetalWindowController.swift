@@ -848,7 +848,13 @@ class WingsAwareWindow: NSWindow {
         // The window shadow's inner edge bleeds 1-2px onto screen pixels
         // when the frame == screen.frame; visible as a grey halo.
         self.hasShadow = false
-        NSApp.presentationOptions = [.autoHideMenuBar, .autoHideDock]
+        // .hideMenuBar / .hideDock keep them fully hidden — no reveal
+        // when the cursor hits the top/bottom edge. .autoHide* would
+        // pop them out and break the wings-edge-to-edge illusion when
+        // the user nudges the cursor against an edge. Allowed here
+        // because our window isn't in native .fullScreen styleMask
+        // (which would forbid .hideDock); we use borderless instead.
+        NSApp.presentationOptions = [.hideMenuBar, .hideDock]
         super.setFrame(screen.frame, display: true)
         self.makeKeyAndOrderFront(nil)
         isFakeFullScreen = true
