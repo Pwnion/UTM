@@ -28,9 +28,14 @@ class VMDisplayQemuMetalWindowController: VMDisplayQemuWindowController {
                 oldValue?.removeRenderer(renderer)
                 vmDisplay?.addRenderer(renderer)
             }
+            teardownSeamlessCursor(on: oldValue)
+            setupSeamlessCursor(on: vmDisplay)
         }
     }
     private var vmInput: CSInput?
+    private var cursorObservations: [NSKeyValueObservation] = []
+    private var lastCursorSize: CGSize = .zero
+    private var lastCursorHotspot: CGPoint = .zero
     
     private var displaySize: CGSize = .zero
     private var isDisplaySizeDynamic: Bool = false
@@ -153,6 +158,97 @@ class VMDisplayQemuMetalWindowController: VMDisplayQemuWindowController {
                 ?? NSScreen.main?.maximumFramesPerSecond
                 ?? 60
             metalView.preferredFramesPerSecond = maxFps
+        }
+    }
+
+    // MARK: - Seamless cursor sync
+    //
+    // Mirrors the guest's cursor shape (I-beam over text, hand over links,
+    // resize, busy spinner, etc.) onto macOS's NSCursor so the user sees
+    // the snappy host-rendered pointer with the guest's contextual shape.
+    // The guest's own cursor sprite is inhibited (isInhibited=true) so
+    // there's no laggy duplicate in the framebuffer.
+
+    private func setupSeamlessCursor(on display: CSDisplay?) {
+        guard let cursor = display?.cursor else { return }
+        // Inhibit the framebuffer-drawn cursor sprite. Only takes effect
+        // if the guest is using client-side cursor rendering (which is
+        // the case for SPICE + virtio-gpu + spice-vdagent).
+        cursor.isInhibited = true
+        // KVO on the two public properties that change when the cursor
+        // shape changes. Same-size same-hotspot updates (e.g. busy-spinner
+        // animation frames) will not fire — acceptable v1 trade-off.
+        let sizeObs = cursor.observe(\.cursorSize, options: [.new, .initial]) { [weak self] c, _ in
+            self?.applyGuestCursor(from: c)
+        }
+        let hotObs = cursor.observe(\.cursorHotspot, options: [.new]) { [weak self] c, _ in
+            self?.applyGuestCursor(from: c)
+        }
+        cursorObservations = [sizeObs, hotObs]
+    }
+
+    private func teardownSeamlessCursor(on display: CSDisplay?) {
+        for o in cursorObservations { o.invalidate() }
+        cursorObservations.removeAll()
+        display?.cursor?.isInhibited = false
+        metalView?.displayCursor = nil
+        lastCursorSize = .zero
+        lastCursorHotspot = .zero
+    }
+
+    private func applyGuestCursor(from cursor: CSCursor) {
+        let size = cursor.cursorSize
+        let hotspot = cursor.cursorHotspot
+        guard size.width > 0, size.height > 0,
+              let texture = cursor.texture else {
+            DispatchQueue.main.async { [weak self] in
+                self?.metalView?.displayCursor = nil
+            }
+            return
+        }
+        // Dedupe — KVO fires once per size + once per hotspot, but image
+        // construction is cheap so it's fine if we run twice.
+        lastCursorSize = size
+        lastCursorHotspot = hotspot
+
+        let w = Int(size.width)
+        let h = Int(size.height)
+        let bytesPerRow = w * 4
+        var pixels = [UInt8](repeating: 0, count: bytesPerRow * h)
+        // The texture is BGRA8 premultiplied. Read on the main thread —
+        // SPICE channel callbacks fire on the main run loop in CocoaSpice
+        // so by the time KVO has notified us, the texture is settled.
+        pixels.withUnsafeMutableBytes { ptr in
+            texture.getBytes(ptr.baseAddress!,
+                             bytesPerRow: bytesPerRow,
+                             from: MTLRegion(origin: MTLOrigin(x: 0, y: 0, z: 0),
+                                             size: MTLSize(width: w, height: h, depth: 1)),
+                             mipmapLevel: 0)
+        }
+
+        guard let provider = CGDataProvider(data: Data(pixels) as CFData) else { return }
+        let bitmapInfo = CGBitmapInfo(rawValue:
+            CGImageAlphaInfo.premultipliedFirst.rawValue |
+            CGBitmapInfo.byteOrder32Little.rawValue)
+        guard let cgImage = CGImage(width: w, height: h,
+                                    bitsPerComponent: 8,
+                                    bitsPerPixel: 32,
+                                    bytesPerRow: bytesPerRow,
+                                    space: CGColorSpaceCreateDeviceRGB(),
+                                    bitmapInfo: bitmapInfo,
+                                    provider: provider,
+                                    decode: nil,
+                                    shouldInterpolate: false,
+                                    intent: .defaultIntent) else { return }
+
+        // NSCursor hotspot is in image-pixel coords; SPICE delivers in the
+        // same. 1:1 image size — don't pre-scale for Retina (NSCursor
+        // scales poorly; matches spice-gtk default).
+        let image = NSImage(cgImage: cgImage, size: NSSize(width: w, height: h))
+        let nsCursor = NSCursor(image: image, hotSpot: hotspot)
+
+        DispatchQueue.main.async { [weak self] in
+            self?.metalView?.displayCursor = nsCursor
         }
     }
 

@@ -24,6 +24,30 @@ class VMMetalView: MTKView {
     private(set) var isMouseCaptured = false
     private(set) var isFirstResponder = false
     private(set) var isMouseInWindow = false
+
+    /// Cursor mirrored from the guest's current pointer shape, set by the
+    /// window controller's seamless-cursor sync. Reasserted on every
+    /// cursorUpdate event because AppKit clears NSCursor.set() on window
+    /// transitions. nil means use the default arrow.
+    var displayCursor: NSCursor? {
+        didSet { window?.invalidateCursorRects(for: self) }
+    }
+
+    override func cursorUpdate(with event: NSEvent) {
+        if isMouseCaptured {
+            // In captured mode the cursor is hidden — let super handle.
+            super.cursorUpdate(with: event)
+            return
+        }
+        (displayCursor ?? NSCursor.arrow).set()
+    }
+
+    override func resetCursorRects() {
+        super.resetCursorRects()
+        if !isMouseCaptured {
+            addCursorRect(bounds, cursor: displayCursor ?? NSCursor.arrow)
+        }
+    }
     @Setting("HandleInitialClick") private var isHandleInitialClick: Bool = false
     @Setting("IsCtrlCmdSwapped") private var isCtrlCmdSwapped = false
     @Setting("IsISOKeySwapped") private var isISOKeySwapped = false

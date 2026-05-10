@@ -13,10 +13,10 @@
     {
       "identity" : "cocoaspice",
       "kind" : "remoteSourceControl",
-      "location" : "https://github.com/utmapp/CocoaSpice.git",
+      "location" : "https://github.com/Pwnion/CocoaSpice.git",
       "state" : {
-        "branch" : "main",
-        "revision" : "52b1535824657354fc3089eab24f1827280f9143"
+        "branch" : "expose-cursor-hotspot",
+        "revision" : "a69ba2becb83e16471e0bddf771bc5c7b0e10a0a"
       }
     },
     {
