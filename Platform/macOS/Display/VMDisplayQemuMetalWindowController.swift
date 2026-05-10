@@ -96,11 +96,13 @@ class VMDisplayQemuMetalWindowController: VMDisplayQemuWindowController {
             logger.critical("Failed to create renderer.")
             return
         }
-        if rendererFpsLimit > 0 {
-            metalView.preferredFramesPerSecond = rendererFpsLimit
-        } else if #available(macOS 12, *), let maxFps = self.window?.screen?.maximumFramesPerSecond {
-            metalView.preferredFramesPerSecond = maxFps
-        }
+        // FPS preference: at windowDidLoad time `self.window?.screen` is
+        // often nil because the window hasn't been placed on a screen
+        // yet, so the maxFps branch falls through and MTKView keeps its
+        // default of 60 — even on a 120Hz panel. Use NSScreen.main as the
+        // fallback so we always set something, and re-check when the
+        // window's screen changes (see screenChangedToken below).
+        applyPreferredFps()
         renderer.changeUpscaler(displayConfig?.upscalingFilter.metalSamplerMinMagFilter ?? .linear, downscaler: displayConfig?.downscalingFilter.metalSamplerMinMagFilter ?? .linear)
         vmDisplay?.addRenderer(renderer) // can be nil if primary
         metalView.delegate = renderer
@@ -114,6 +116,9 @@ class VMDisplayQemuMetalWindowController: VMDisplayQemuWindowController {
                !isDisplaySizeDynamic {
                 window.contentMinSize = contentMinSize(in: window, for: displaySize)
             }
+            // Re-apply the FPS preference now that we know which screen
+            // we're on (windowDidLoad fires before the window is placed).
+            self?.applyPreferredFps()
         }
 
         if isSecondary && isDisplaySizeDynamic, let window = window {
@@ -122,7 +127,25 @@ class VMDisplayQemuMetalWindowController: VMDisplayQemuWindowController {
 
         super.windowDidLoad()
     }
-    
+
+    private func applyPreferredFps() {
+        guard let metalView = metalView else { return }
+        if rendererFpsLimit > 0 {
+            metalView.preferredFramesPerSecond = rendererFpsLimit
+            return
+        }
+        // window.screen is nil before placement; fall through to NSScreen.main
+        // (typically the same display) instead of leaving MTKView at its
+        // 60Hz default — that floor is the dominant input-lag contributor
+        // on a 120Hz MBP. maximumFramesPerSecond is macOS 12+ only.
+        if #available(macOS 12, *) {
+            let maxFps = self.window?.screen?.maximumFramesPerSecond
+                ?? NSScreen.main?.maximumFramesPerSecond
+                ?? 60
+            metalView.preferredFramesPerSecond = maxFps
+        }
+    }
+
     override func windowWillClose(_ notification: Notification) {
         vmDisplay?.removeRenderer(renderer!)
         stopAllCapture()
