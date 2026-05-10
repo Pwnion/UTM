@@ -89,6 +89,16 @@ class VMDisplayQemuMetalWindowController: VMDisplayQemuWindowController {
             logger.critical("Cannot find system default Metal device.")
             return
         }
+        // Reduce CAMetalLayer's drawable pool from the default 3 to 2.
+        // Triple-buffering adds up to one frame of host-side queue
+        // latency; cutting to two halves the worst-case wait at the
+        // cost of dropping a frame if rendering misses vsync. For a
+        // simple texture blit (the guest framebuffer) this is fine and
+        // saves ~8.3ms at 120Hz on the input-to-photon path.
+        // See Apple devforum thread 711033 + Flutter Impeller #138490.
+        if let metalLayer = metalView.layer as? CAMetalLayer {
+            metalLayer.maximumDrawableCount = 2
+        }
         displayView.addSubview(metalView)
         renderer = CSMetalRenderer.init(metalKitView: metalView)
         guard let renderer = self.renderer else {
