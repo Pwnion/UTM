@@ -940,15 +940,28 @@ import Virtualization // for getting network interfaces
         } else {
             f("-usb")
         }
+        // On `virt` (aarch64) machines, use virtio-input devices for
+        // pointer/keyboard. usb-tablet/usb-kbd add an XHCI poll thread
+        // and mailbox latency that virtio-input bypasses (kraxel.org
+        // 2014 + QEMU mailing list). Other targets keep usb-* because
+        // virtio-input requires a virtio bus that legacy machines lack.
+        let useVirtioInput = system.target.rawValue.hasPrefix("virt")
         if !isClassicMacNewWorld {
             f("-device")
-            f("usb-tablet,bus=usb-bus.0")
+            f(useVirtioInput ? "virtio-tablet-pci" : "usb-tablet,bus=usb-bus.0")
         }
         if !qemu.hasPS2Controller {
-            f("-device")
-            f("usb-mouse,bus=usb-bus.0")
-            f("-device")
-            f("usb-kbd,bus=usb-bus.0")
+            if useVirtioInput {
+                f("-device")
+                f("virtio-mouse-pci")
+                f("-device")
+                f("virtio-keyboard-pci")
+            } else {
+                f("-device")
+                f("usb-mouse,bus=usb-bus.0")
+                f("-device")
+                f("usb-kbd,bus=usb-bus.0")
+            }
         }
         #if WITH_USB
         let maxDevices = input.maximumUsbShare
