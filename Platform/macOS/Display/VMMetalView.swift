@@ -59,7 +59,11 @@ class VMMetalView: MTKView {
     
     override func becomeFirstResponder() -> Bool {
         isFirstResponder = true
-        if isMouseInWindow {
+        // Only hide the macOS cursor when actually captured. Otherwise
+        // keeping it visible over the VM view gives the user the host's
+        // zero-lag cursor instead of the SPICE-pipeline-lagged guest
+        // sprite, which is the dominant source of perceived cursor lag.
+        if isMouseInWindow && isMouseCaptured {
             NSCursor.tryHide()
         }
         return super.becomeFirstResponder()
@@ -94,7 +98,10 @@ class VMMetalView: MTKView {
     override func mouseEntered(with event: NSEvent) {
         logger.debug("mouse entered (first responder: \(isFirstResponder))")
         isMouseInWindow = true
-        if isFirstResponder {
+        // Same logic as becomeFirstResponder: only hide host cursor when
+        // captured. In uncaptured mode the host cursor is the snappy one
+        // we want to keep visible.
+        if isFirstResponder && isMouseCaptured {
             NSCursor.tryHide()
         }
     }
