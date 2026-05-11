@@ -30,7 +30,15 @@ class VMMetalView: MTKView {
     /// cursorUpdate event because AppKit clears NSCursor.set() on window
     /// transitions. nil means use the default arrow.
     var displayCursor: NSCursor? {
-        didSet { window?.invalidateCursorRects(for: self) }
+        didSet {
+            window?.invalidateCursorRects(for: self)
+            // invalidateCursorRects only rebuilds the rects for the next
+            // mouse-enter event — the visible cursor doesn't change until
+            // then. Set() it now if we're under the cursor.
+            if !isMouseCaptured && isMouseInWindow {
+                (displayCursor ?? NSCursor.arrow).set()
+            }
+        }
     }
 
     override func cursorUpdate(with event: NSEvent) {
