@@ -192,15 +192,15 @@ class VMDisplayQemuMetalWindowController: VMDisplayQemuWindowController {
         cursor.isInhibited = true
 
         // Swift's typed KeyPath KVO (`cursor.observe(\.cursorSize, …)`)
-        // silently fails to subscribe to KVO notifications on the
-        // bridged CSCursor properties (only the .initial value fires;
-        // subsequent .new updates never deliver). Poll instead — at 10Hz
-        // this is plenty for cursor shape changes (which happen on
-        // hover events, ~10 per second max in practice) and trivially
-        // cheap. The dedupe in applyGuestCursor avoids rebuilding the
-        // NSCursor on unchanged frames.
+        // silently fails to subscribe to KVO notifications on bridged
+        // CSCursor properties (only .initial fires; subsequent .new
+        // updates never deliver). Poll at the display refresh rate
+        // (60Hz ≈ 16.7ms) so shape transitions land within one frame —
+        // 10Hz polling left a perceptible ~100ms lag between guest
+        // shape change and host display. Dedupe in the poll keeps the
+        // NSCursor rebuild + getBytes off the hot path on unchanged frames.
         weak var weakCursor: CSCursor? = cursor
-        cursorPollTimer = Timer.scheduledTimer(withTimeInterval: 0.1, repeats: true) { [weak self] _ in
+        cursorPollTimer = Timer.scheduledTimer(withTimeInterval: 1.0 / 60.0, repeats: true) { [weak self] _ in
             guard let self = self, let c = weakCursor else { return }
             let size = c.cursorSize
             let hotspot = c.cursorHotspot
@@ -280,11 +280,18 @@ class VMDisplayQemuMetalWindowController: VMDisplayQemuWindowController {
                                     shouldInterpolate: false,
                                     intent: .defaultIntent) else { return }
 
-        // NSCursor hotspot is in image-pixel coords; SPICE delivers in the
-        // same. 1:1 image size — don't pre-scale for Retina (NSCursor
-        // scales poorly; matches spice-gtk default).
-        let image = NSImage(cgImage: cgImage, size: NSSize(width: w, height: h))
-        let nsCursor = NSCursor(image: image, hotSpot: hotspot)
+        // Treat the cursor texture as @2x for Retina. The guest delivers
+        // pixel-accurate cursors (64×64 typically); macOS renders NSImage
+        // size in *points*. Setting image.size = half the pixel dimensions
+        // makes macOS use the texture as the 2× backing, so the visible
+        // cursor lands at native macOS cursor size on Retina displays.
+        // Hotspot is in image-points → halve it too.
+        let scale: CGFloat = 2.0
+        let pointW = CGFloat(w) / scale
+        let pointH = CGFloat(h) / scale
+        let image = NSImage(cgImage: cgImage, size: NSSize(width: pointW, height: pointH))
+        let scaledHotspot = NSPoint(x: hotspot.x / scale, y: hotspot.y / scale)
+        let nsCursor = NSCursor(image: image, hotSpot: scaledHotspot)
 
         DispatchQueue.main.async { [weak self] in
             self?.metalView?.displayCursor = nsCursor
