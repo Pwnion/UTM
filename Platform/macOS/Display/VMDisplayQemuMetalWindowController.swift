@@ -170,21 +170,35 @@ class VMDisplayQemuMetalWindowController: VMDisplayQemuWindowController {
     // there's no laggy duplicate in the framebuffer.
 
     private func setupSeamlessCursor(on display: CSDisplay?) {
-        guard let cursor = display?.cursor else { return }
-        // Inhibit the framebuffer-drawn cursor sprite. Only takes effect
-        // if the guest is using client-side cursor rendering (which is
-        // the case for SPICE + virtio-gpu + spice-vdagent).
+        seamlessLog("setupSeamlessCursor display=\(display != nil ? "set" : "nil") cursor=\(display?.cursor != nil ? "set" : "nil")")
+        guard let display = display else { return }
+        // The cursor is a weak property on CSDisplay and attaches asynchronously
+        // when the SPICE cursor channel connects, which is typically AFTER
+        // vmDisplay is set. Observe it so we set up the inner KVO once it
+        // appears.
+        let cursorAttachObs = display.observe(\.cursor, options: [.new, .initial]) { [weak self] d, _ in
+            self?.seamlessLog("cursor attach KVO fired: cursor=\(d.cursor != nil ? "set" : "nil")")
+            self?.attachCursorObservers(d.cursor)
+        }
+        cursorObservations = [cursorAttachObs]
+    }
+
+    private func attachCursorObservers(_ cursor: CSCursor?) {
+        // Remove inner observers (size + hotspot) but keep the outer
+        // display.cursor observer alive.
+        for o in cursorObservations.dropFirst() { o.invalidate() }
+        cursorObservations = Array(cursorObservations.prefix(1))
+        guard let cursor = cursor else { return }
+
         cursor.isInhibited = true
-        // KVO on the two public properties that change when the cursor
-        // shape changes. Same-size same-hotspot updates (e.g. busy-spinner
-        // animation frames) will not fire — acceptable v1 trade-off.
+        seamlessLog("attached observers, isInhibited=\(cursor.isInhibited)")
         let sizeObs = cursor.observe(\.cursorSize, options: [.new, .initial]) { [weak self] c, _ in
             self?.applyGuestCursor(from: c)
         }
         let hotObs = cursor.observe(\.cursorHotspot, options: [.new]) { [weak self] c, _ in
             self?.applyGuestCursor(from: c)
         }
-        cursorObservations = [sizeObs, hotObs]
+        cursorObservations.append(contentsOf: [sizeObs, hotObs])
     }
 
     private func teardownSeamlessCursor(on display: CSDisplay?) {
@@ -196,9 +210,24 @@ class VMDisplayQemuMetalWindowController: VMDisplayQemuWindowController {
         lastCursorHotspot = .zero
     }
 
+    private func seamlessLog(_ msg: String) {
+        let path = (NSTemporaryDirectory() as NSString).appendingPathComponent("utm-cursor.log")
+        let line = "\(Date()) \(msg)\n"
+        if let data = line.data(using: .utf8) {
+            if let h = FileHandle(forWritingAtPath: path) {
+                h.seekToEndOfFile()
+                h.write(data)
+                try? h.close()
+            } else {
+                try? data.write(to: URL(fileURLWithPath: path))
+            }
+        }
+    }
+
     private func applyGuestCursor(from cursor: CSCursor) {
         let size = cursor.cursorSize
         let hotspot = cursor.cursorHotspot
+        seamlessLog("applyGuestCursor size=\(size) hotspot=\(hotspot) texture=\(cursor.texture != nil ? "set" : "nil")")
         guard size.width > 0, size.height > 0,
               let texture = cursor.texture else {
             DispatchQueue.main.async { [weak self] in
