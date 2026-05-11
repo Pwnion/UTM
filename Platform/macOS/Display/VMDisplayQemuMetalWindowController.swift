@@ -193,12 +193,26 @@ class VMDisplayQemuMetalWindowController: VMDisplayQemuWindowController {
         cursor.isInhibited = true
         seamlessLog("attached observers, isInhibited=\(cursor.isInhibited)")
         let sizeObs = cursor.observe(\.cursorSize, options: [.new, .initial]) { [weak self] c, _ in
+            self?.seamlessLog("KVO cursorSize fired: \(c.cursorSize)")
             self?.applyGuestCursor(from: c)
         }
         let hotObs = cursor.observe(\.cursorHotspot, options: [.new]) { [weak self] c, _ in
+            self?.seamlessLog("KVO cursorHotspot fired: \(c.cursorHotspot)")
             self?.applyGuestCursor(from: c)
         }
         cursorObservations.append(contentsOf: [sizeObs, hotObs])
+
+        // Diagnostic poll: KVO may be the problem. Poll cursor every
+        // 500ms for 30 seconds and log non-zero sizes.
+        let weakCursor = cursor
+        for i in 1...60 {
+            DispatchQueue.main.asyncAfter(deadline: .now() + 0.5 * Double(i)) { [weak self, weak weakCursor] in
+                guard let self = self, let c = weakCursor else { return }
+                if c.cursorSize != .zero {
+                    self.seamlessLog("POLL t=\(i): cursorSize=\(c.cursorSize) hotspot=\(c.cursorHotspot) texture=\(c.texture != nil ? "set" : "nil")")
+                }
+            }
+        }
     }
 
     private func teardownSeamlessCursor(on display: CSDisplay?) {
