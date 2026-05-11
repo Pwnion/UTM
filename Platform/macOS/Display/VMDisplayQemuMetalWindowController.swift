@@ -227,24 +227,24 @@ class VMDisplayQemuMetalWindowController: VMDisplayQemuWindowController {
             return
         }
 
-        // Cheap hash: sample bytes from a few rows of the texture. A full
-        // hash of a 64×64 BGRA cursor (~16KB) would be fine too, but
-        // sampling 4 stripes × first 64 bytes is enough to catch any
-        // realistic cursor difference and keeps the poll near-free.
+        // Cheap content hash: sample 4 stripes of the cursor. Each stripe
+        // reads the first `sampleWidth` pixels of one row — buffer is
+        // sized to match exactly (sampleWidth × 4 bytes per pixel) so
+        // getBytes doesn't overrun.
         let w = Int(size.width)
         let h = Int(size.height)
-        let bytesPerRow = w * 4
-        let sampleBytes = min(64, bytesPerRow)
-        var stripe = [UInt8](repeating: 0, count: sampleBytes)
+        let sampleWidth = min(16, w)
+        let stripeBytes = sampleWidth * 4
+        var stripe = [UInt8](repeating: 0, count: stripeBytes)
         var hasher = Hasher()
         hasher.combine(w)
         hasher.combine(h)
         for y in stride(from: 0, to: h, by: max(1, h / 4)) {
             stripe.withUnsafeMutableBytes { ptr in
                 texture.getBytes(ptr.baseAddress!,
-                                 bytesPerRow: bytesPerRow,
+                                 bytesPerRow: stripeBytes,
                                  from: MTLRegion(origin: MTLOrigin(x: 0, y: y, z: 0),
-                                                 size: MTLSize(width: w, height: 1, depth: 1)),
+                                                 size: MTLSize(width: sampleWidth, height: 1, depth: 1)),
                                  mipmapLevel: 0)
             }
             for b in stripe { hasher.combine(b) }
