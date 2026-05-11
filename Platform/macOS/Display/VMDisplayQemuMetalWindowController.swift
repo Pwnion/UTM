@@ -36,6 +36,7 @@ class VMDisplayQemuMetalWindowController: VMDisplayQemuWindowController {
     private var cursorObservations: [NSKeyValueObservation] = []
     private var lastCursorSize: CGSize = .zero
     private var lastCursorHotspot: CGPoint = .zero
+    private var cursorPollTimer: Timer?
     
     private var displaySize: CGSize = .zero
     private var isDisplaySizeDynamic: Bool = false
@@ -184,33 +185,27 @@ class VMDisplayQemuMetalWindowController: VMDisplayQemuWindowController {
     }
 
     private func attachCursorObservers(_ cursor: CSCursor?) {
-        // Remove inner observers (size + hotspot) but keep the outer
-        // display.cursor observer alive.
-        for o in cursorObservations.dropFirst() { o.invalidate() }
-        cursorObservations = Array(cursorObservations.prefix(1))
+        cursorPollTimer?.invalidate()
+        cursorPollTimer = nil
         guard let cursor = cursor else { return }
 
         cursor.isInhibited = true
-        seamlessLog("attached observers, isInhibited=\(cursor.isInhibited)")
-        let sizeObs = cursor.observe(\.cursorSize, options: [.new, .initial]) { [weak self] c, _ in
-            self?.seamlessLog("KVO cursorSize fired: \(c.cursorSize)")
-            self?.applyGuestCursor(from: c)
-        }
-        let hotObs = cursor.observe(\.cursorHotspot, options: [.new]) { [weak self] c, _ in
-            self?.seamlessLog("KVO cursorHotspot fired: \(c.cursorHotspot)")
-            self?.applyGuestCursor(from: c)
-        }
-        cursorObservations.append(contentsOf: [sizeObs, hotObs])
 
-        // Diagnostic poll: KVO may be the problem. Poll cursor every
-        // 500ms for 30 seconds and log non-zero sizes.
-        let weakCursor = cursor
-        for i in 1...60 {
-            DispatchQueue.main.asyncAfter(deadline: .now() + 0.5 * Double(i)) { [weak self, weak weakCursor] in
-                guard let self = self, let c = weakCursor else { return }
-                if c.cursorSize != .zero {
-                    self.seamlessLog("POLL t=\(i): cursorSize=\(c.cursorSize) hotspot=\(c.cursorHotspot) texture=\(c.texture != nil ? "set" : "nil")")
-                }
+        // Swift's typed KeyPath KVO (`cursor.observe(\.cursorSize, …)`)
+        // silently fails to subscribe to KVO notifications on the
+        // bridged CSCursor properties (only the .initial value fires;
+        // subsequent .new updates never deliver). Poll instead — at 10Hz
+        // this is plenty for cursor shape changes (which happen on
+        // hover events, ~10 per second max in practice) and trivially
+        // cheap. The dedupe in applyGuestCursor avoids rebuilding the
+        // NSCursor on unchanged frames.
+        weak var weakCursor: CSCursor? = cursor
+        cursorPollTimer = Timer.scheduledTimer(withTimeInterval: 0.1, repeats: true) { [weak self] _ in
+            guard let self = self, let c = weakCursor else { return }
+            let size = c.cursorSize
+            let hotspot = c.cursorHotspot
+            if size != self.lastCursorSize || hotspot != self.lastCursorHotspot {
+                self.applyGuestCursor(from: c)
             }
         }
     }
@@ -218,6 +213,8 @@ class VMDisplayQemuMetalWindowController: VMDisplayQemuWindowController {
     private func teardownSeamlessCursor(on display: CSDisplay?) {
         for o in cursorObservations { o.invalidate() }
         cursorObservations.removeAll()
+        cursorPollTimer?.invalidate()
+        cursorPollTimer = nil
         display?.cursor?.isInhibited = false
         metalView?.displayCursor = nil
         lastCursorSize = .zero
@@ -241,7 +238,6 @@ class VMDisplayQemuMetalWindowController: VMDisplayQemuWindowController {
     private func applyGuestCursor(from cursor: CSCursor) {
         let size = cursor.cursorSize
         let hotspot = cursor.cursorHotspot
-        seamlessLog("applyGuestCursor size=\(size) hotspot=\(hotspot) texture=\(cursor.texture != nil ? "set" : "nil")")
         guard size.width > 0, size.height > 0,
               let texture = cursor.texture else {
             DispatchQueue.main.async { [weak self] in
