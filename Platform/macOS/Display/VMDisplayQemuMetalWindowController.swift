@@ -985,7 +985,6 @@ class WingsAwareWindow: NSWindow {
     private var savedContentMinSize: NSSize = .zero
     private var savedBackgroundColor: NSColor?
     private var savedHasShadow: Bool = true
-    private var cursorConfinementMonitor: Any?
     private(set) var isFakeFullScreen: Bool = false
 
     // Borderless windows can't accept key/main without these overrides.
@@ -1034,28 +1033,6 @@ class WingsAwareWindow: NSWindow {
         self.makeKeyAndOrderFront(nil)
         isFakeFullScreen = true
 
-        // Clamp the cursor to the window's frame whenever it tries to
-        // move outside. macOS's natural clamp at screen edges sometimes
-        // lets the cursor slip onto Control Center reveal triggers and
-        // hot-corner regions even with .hideMenuBar/.hideDock set —
-        // this monitor catches the cursor mid-event and warps it back.
-        cursorConfinementMonitor = NSEvent.addLocalMonitorForEvents(
-            matching: [.mouseMoved, .leftMouseDragged, .rightMouseDragged, .otherMouseDragged]
-        ) { [weak self] event in
-            guard let self = self, self.isFakeFullScreen else { return event }
-            let loc = NSEvent.mouseLocation  // Cocoa coords (Y up)
-            let f = self.frame
-            let inset: CGFloat = 1
-            let clampedX = min(max(loc.x, f.minX + inset), f.maxX - inset)
-            let clampedY = min(max(loc.y, f.minY + inset), f.maxY - inset)
-            if clampedX != loc.x || clampedY != loc.y, let s = self.screen {
-                // CGWarp uses CG coords (Y down, origin at top-left).
-                let cgY = s.frame.maxY - clampedY
-                CGWarpMouseCursorPosition(CGPoint(x: clampedX, y: cgY))
-            }
-            return event
-        }
-
         let n = Notification(name: NSWindow.didEnterFullScreenNotification, object: self)
         (delegate as? NSWindowDelegate)?.windowDidEnterFullScreen?(n)
     }
@@ -1063,11 +1040,6 @@ class WingsAwareWindow: NSWindow {
     private func exitFakeFullScreen() {
         let n = Notification(name: NSWindow.didExitFullScreenNotification, object: self)
         (delegate as? NSWindowDelegate)?.windowDidExitFullScreen?(n)
-
-        if let mon = cursorConfinementMonitor {
-            NSEvent.removeMonitor(mon)
-            cursorConfinementMonitor = nil
-        }
 
         NSApp.presentationOptions = savedPresentationOptions
         self.styleMask = savedStyleMask
