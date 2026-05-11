@@ -360,7 +360,7 @@ enum QEMUDriveInterface: String, CaseIterable, QEMUConstant {
     case virtio = "VirtIO"
     case nvme = "NVMe"
     case usb = "USB"
-    
+
     var prettyValue: String {
         switch self {
         case .none: return NSLocalizedString("None (Advanced)", comment: "UTMQemuConstants")
@@ -373,6 +373,50 @@ enum QEMUDriveInterface: String, CaseIterable, QEMUConstant {
         case .virtio: return NSLocalizedString("VirtIO", comment: "UTMQemuConstants")
         case .nvme: return NSLocalizedString("NVMe", comment: "UTMQemuConstants")
         case .usb: return NSLocalizedString("USB", comment: "UTMQemuConstants")
+        }
+    }
+}
+
+// rawValue == QEMU CLI value: emitted verbatim into `-drive cache=…,aio=…`.
+// The plist also stores rawValue, so bundle files end up with familiar
+// values like `<string>none</string>` rather than a Pascal-case alias.
+
+enum QEMUDriveCache: String, CaseIterable, QEMUConstant {
+    /// Inherit QEMU's default — do not emit a cache= flag at all.
+    case `default` = "default"
+    /// Skip the host page cache. Best for image files on a CoW filesystem
+    /// (APFS) where double-caching is pure overhead.
+    case none = "none"
+    case writethrough = "writethrough"
+    case writeback = "writeback"
+    case directsync = "directsync"
+    case unsafe = "unsafe"
+
+    var prettyValue: String {
+        switch self {
+        case .default: return NSLocalizedString("Default", comment: "UTMQemuConstants")
+        case .none: return NSLocalizedString("None (bypass host cache)", comment: "UTMQemuConstants")
+        case .writethrough: return NSLocalizedString("Writethrough", comment: "UTMQemuConstants")
+        case .writeback: return NSLocalizedString("Writeback", comment: "UTMQemuConstants")
+        case .directsync: return NSLocalizedString("Direct Sync", comment: "UTMQemuConstants")
+        case .unsafe: return NSLocalizedString("Unsafe (no flush)", comment: "UTMQemuConstants")
+        }
+    }
+}
+
+enum QEMUDriveAio: String, CaseIterable, QEMUConstant {
+    /// QEMU's portable default — POSIX AIO via thread pool.
+    case threads = "threads"
+    /// Linux libaio. Not available on macOS hosts.
+    case native = "native"
+    /// Linux io_uring. Not available on macOS hosts.
+    case io_uring = "io_uring"
+
+    var prettyValue: String {
+        switch self {
+        case .threads: return NSLocalizedString("Threads (default)", comment: "UTMQemuConstants")
+        case .native: return NSLocalizedString("Native (libaio, Linux only)", comment: "UTMQemuConstants")
+        case .io_uring: return NSLocalizedString("io_uring (Linux only)", comment: "UTMQemuConstants")
         }
     }
 }

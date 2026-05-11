@@ -96,6 +96,19 @@ struct VMConfigDriveDetailsView: View {
                     Text("Update Interface")
                 }.help("Older versions of UTM added each IDE device to a separate bus. Check this to change the configuration to place two units on each bus.")
             }
+
+            // Advanced performance knobs — only meaningful for real disk
+            // attachments, not BIOS/kernel/initrd blobs.
+            if config.imageType == .disk || config.imageType == .cd {
+                VMConfigConstantPicker("Cache Mode", selection: $config.cache)
+                    .help("Host page-cache behaviour. 'None' bypasses the macOS page cache and avoids double-caching on top of the guest's own.")
+                VMConfigConstantPicker("Async I/O Backend", selection: $config.aio)
+                    .help("QEMU AIO backend. 'Threads' is the only option that works on macOS hosts; the others are Linux-only.")
+                if config.interface == .virtio {
+                    Toggle("Dedicated I/O thread", isOn: $config.iothread)
+                        .help("Move this drive's request submission onto its own QEMU iothread, off the main event loop. Recommended for virtio-blk on a daily-driver VM.")
+                }
+            }
             
             if let imageUrl = config.imageURL {
                 let fileSize = data.computeSize(for: imageUrl)

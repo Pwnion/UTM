@@ -823,6 +823,14 @@ import Virtualization // for getting network interfaces
             bootindex += 1
             f()
         } else if drive.interface == .virtio {
+            // iothread must be declared before the virtio-blk device that
+            // references it — QEMU parses args sequentially.
+            if drive.iothread {
+                f("-object")
+                "iothread"
+                "id=iothread-\(drive.id)"
+                f()
+            }
             f("-device")
             if system.architecture == .s390x {
                 "virtio-blk-ccw"
@@ -833,6 +841,9 @@ import Virtualization // for getting network interfaces
             }
             "drive=drive\(drive.id)"
             "serial=\(drive.serial)"
+            if drive.iothread {
+                "iothread=iothread-\(drive.id)"
+            }
             if !disableBootIndex {
                 "bootindex=\(bootindex)"
             }
@@ -926,6 +937,12 @@ import Virtualization // for getting network interfaces
         } else {
             "discard=unmap"
             "detect-zeroes=unmap"
+        }
+        if drive.cache != .default {
+            "cache=\(drive.cache.rawValue)"
+        }
+        if drive.aio != .threads {
+            "aio=\(drive.aio.rawValue)"
         }
         if !isUseFileLock && (!isCd || drive.imageURL != nil) {
             "file.locking=off"
