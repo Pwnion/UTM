@@ -36,6 +36,7 @@ class VMDisplayQemuMetalWindowController: VMDisplayQemuWindowController {
     private var cursorObservations: [NSKeyValueObservation] = []
     private var lastCursorSize: CGSize = .zero
     private var lastCursorHotspot: CGPoint = .zero
+    private var lastCursorHash: UInt64 = 0
     private var cursorPollTimer: Timer?
     
     private var displaySize: CGSize = .zero
@@ -194,20 +195,67 @@ class VMDisplayQemuMetalWindowController: VMDisplayQemuWindowController {
         // Swift's typed KeyPath KVO (`cursor.observe(\.cursorSize, …)`)
         // silently fails to subscribe to KVO notifications on bridged
         // CSCursor properties (only .initial fires; subsequent .new
-        // updates never deliver). Poll at the display refresh rate
-        // (60Hz ≈ 16.7ms) so shape transitions land within one frame —
-        // 10Hz polling left a perceptible ~100ms lag between guest
-        // shape change and host display. Dedupe in the poll keeps the
-        // NSCursor rebuild + getBytes off the hot path on unchanged frames.
+        // updates never deliver). Poll at 30Hz instead — enough to land
+        // shape transitions within ~33ms, low enough to avoid spamming
+        // NSCursor.set() on every frame (which made the cursor visibly
+        // shake at 60Hz).
+        //
+        // Dedupe via texture-content hash. Two cursors with identical
+        // size+hotspot but different pixels (e.g. arrow vs link-hand,
+        // both 64×64 hotspot=(0,0)) are common and our previous
+        // size+hotspot dedupe missed them entirely.
         weak var weakCursor: CSCursor? = cursor
-        cursorPollTimer = Timer.scheduledTimer(withTimeInterval: 1.0 / 60.0, repeats: true) { [weak self] _ in
+        cursorPollTimer = Timer.scheduledTimer(withTimeInterval: 1.0 / 30.0, repeats: true) { [weak self] _ in
             guard let self = self, let c = weakCursor else { return }
-            let size = c.cursorSize
-            let hotspot = c.cursorHotspot
-            if size != self.lastCursorSize || hotspot != self.lastCursorHotspot {
-                self.applyGuestCursor(from: c)
-            }
+            self.checkAndApplyCursorIfChanged(c)
         }
+    }
+
+    private func checkAndApplyCursorIfChanged(_ cursor: CSCursor) {
+        let size = cursor.cursorSize
+        let hotspot = cursor.cursorHotspot
+        guard size.width > 0, size.height > 0,
+              let texture = cursor.texture else {
+            if lastCursorSize != .zero {
+                lastCursorSize = .zero
+                lastCursorHotspot = .zero
+                lastCursorHash = 0
+                DispatchQueue.main.async { [weak self] in
+                    self?.metalView?.displayCursor = nil
+                }
+            }
+            return
+        }
+
+        // Cheap hash: sample bytes from a few rows of the texture. A full
+        // hash of a 64×64 BGRA cursor (~16KB) would be fine too, but
+        // sampling 4 stripes × first 64 bytes is enough to catch any
+        // realistic cursor difference and keeps the poll near-free.
+        let w = Int(size.width)
+        let h = Int(size.height)
+        let bytesPerRow = w * 4
+        let sampleBytes = min(64, bytesPerRow)
+        var stripe = [UInt8](repeating: 0, count: sampleBytes)
+        var hasher = Hasher()
+        hasher.combine(w)
+        hasher.combine(h)
+        for y in stride(from: 0, to: h, by: max(1, h / 4)) {
+            stripe.withUnsafeMutableBytes { ptr in
+                texture.getBytes(ptr.baseAddress!,
+                                 bytesPerRow: bytesPerRow,
+                                 from: MTLRegion(origin: MTLOrigin(x: 0, y: y, z: 0),
+                                                 size: MTLSize(width: w, height: 1, depth: 1)),
+                                 mipmapLevel: 0)
+            }
+            for b in stripe { hasher.combine(b) }
+        }
+        let hash = UInt64(bitPattern: Int64(hasher.finalize()))
+
+        if size == lastCursorSize && hotspot == lastCursorHotspot && hash == lastCursorHash {
+            return
+        }
+        lastCursorHash = hash
+        applyGuestCursor(from: cursor)
     }
 
     private func teardownSeamlessCursor(on display: CSDisplay?) {
