@@ -172,14 +172,11 @@ class VMDisplayQemuMetalWindowController: VMDisplayQemuWindowController {
     // there's no laggy duplicate in the framebuffer.
 
     private func setupSeamlessCursor(on display: CSDisplay?) {
-        seamlessLog("setupSeamlessCursor display=\(display != nil ? "set" : "nil") cursor=\(display?.cursor != nil ? "set" : "nil")")
         guard let display = display else { return }
         // The cursor is a weak property on CSDisplay and attaches asynchronously
         // when the SPICE cursor channel connects, which is typically AFTER
-        // vmDisplay is set. Observe it so we set up the inner KVO once it
-        // appears.
+        // vmDisplay is set. Observe it so we hook the poll once it appears.
         let cursorAttachObs = display.observe(\.cursor, options: [.new, .initial]) { [weak self] d, _ in
-            self?.seamlessLog("cursor attach KVO fired: cursor=\(d.cursor != nil ? "set" : "nil")")
             self?.attachCursorObservers(d.cursor)
         }
         cursorObservations = [cursorAttachObs]
@@ -269,19 +266,6 @@ class VMDisplayQemuMetalWindowController: VMDisplayQemuWindowController {
         lastCursorHotspot = .zero
     }
 
-    private func seamlessLog(_ msg: String) {
-        let path = (NSTemporaryDirectory() as NSString).appendingPathComponent("utm-cursor.log")
-        let line = "\(Date()) \(msg)\n"
-        if let data = line.data(using: .utf8) {
-            if let h = FileHandle(forWritingAtPath: path) {
-                h.seekToEndOfFile()
-                h.write(data)
-                try? h.close()
-            } else {
-                try? data.write(to: URL(fileURLWithPath: path))
-            }
-        }
-    }
 
     private func applyGuestCursor(from cursor: CSCursor) {
         let size = cursor.cursorSize
