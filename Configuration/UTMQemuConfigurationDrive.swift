@@ -49,10 +49,25 @@ struct UTMQemuConfigurationDrive: UTMConfigurationDrive {
     
     /// If true, the created image will be raw format and not QCOW2. Not saved.
     var isRawImage: Bool = false
-    
+
+    /// Host page-cache strategy for this drive (`-drive cache=…`). `.default`
+    /// means do not emit a cache= flag, preserving QEMU's built-in default
+    /// (and the legacy behaviour of UTM bundles that predate this field).
+    var cache: QEMUDriveCache = .default
+
+    /// Asynchronous I/O backend (`-drive aio=…`). `.threads` is QEMU's
+    /// default — we still emit it explicitly only when set to something
+    /// non-default, to keep generated args minimal.
+    var aio: QEMUDriveAio = .threads
+
+    /// If true, give this drive a dedicated QEMU iothread, moving its
+    /// request submission off the main event loop. Currently only honoured
+    /// for the `virtio` interface (where the perf win is real).
+    var iothread: Bool = false
+
     /// If initialized, returns a default interface for an image type. Not saved.
     var defaultInterfaceForImageType: ((QEMUDriveImageType) -> QEMUDriveInterface)?
-    
+
     enum CodingKeys: String, CodingKey {
         case imageName = "ImageName"
         case imageType = "ImageType"
@@ -60,6 +75,9 @@ struct UTMQemuConfigurationDrive: UTMConfigurationDrive {
         case interfaceVersion = "InterfaceVersion"
         case identifier = "Identifier"
         case isReadOnly = "ReadOnly"
+        case cache = "Cache"
+        case aio = "Aio"
+        case iothread = "IOThread"
     }
     
     init() {
@@ -82,6 +100,9 @@ struct UTMQemuConfigurationDrive: UTMConfigurationDrive {
         interface = try values.decode(QEMUDriveInterface.self, forKey: .interface)
         interfaceVersion = try values.decodeIfPresent(Int.self, forKey: .interfaceVersion) ?? 0
         id = try values.decode(String.self, forKey: .identifier)
+        cache = try values.decodeIfPresent(QEMUDriveCache.self, forKey: .cache) ?? .default
+        aio = try values.decodeIfPresent(QEMUDriveAio.self, forKey: .aio) ?? .threads
+        iothread = try values.decodeIfPresent(Bool.self, forKey: .iothread) ?? false
     }
     
     func encode(to encoder: Encoder) throws {
@@ -98,6 +119,17 @@ struct UTMQemuConfigurationDrive: UTMConfigurationDrive {
         }
         try container.encode(interfaceVersion, forKey: .interfaceVersion)
         try container.encode(id, forKey: .identifier)
+        // Only emit the perf knobs when they diverge from the defaults so
+        // bundles created by stock UTM stay byte-identical on round-trip.
+        if cache != .default {
+            try container.encode(cache, forKey: .cache)
+        }
+        if aio != .threads {
+            try container.encode(aio, forKey: .aio)
+        }
+        if iothread {
+            try container.encode(iothread, forKey: .iothread)
+        }
     }
     
     func hash(into hasher: inout Hasher) {
@@ -110,6 +142,9 @@ struct UTMQemuConfigurationDrive: UTMConfigurationDrive {
         interface.hash(into: &hasher)
         interfaceVersion.hash(into: &hasher)
         isRawImage.hash(into: &hasher)
+        cache.hash(into: &hasher)
+        aio.hash(into: &hasher)
+        iothread.hash(into: &hasher)
     }
     
     func clone() -> UTMQemuConfigurationDrive {
