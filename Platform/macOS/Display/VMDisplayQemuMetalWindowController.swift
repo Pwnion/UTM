@@ -53,6 +53,21 @@ class VMDisplayQemuMetalWindowController: VMDisplayQemuWindowController {
     private var ctrlKeyDown: Bool = false
     private var screenChangedToken: Any?
 
+    // Background render loop. MTKView's default mode runs `[MTKView draw]`
+    // on the main thread via an internal CADisplayLink — and `draw`
+    // ultimately blocks in `[CAMetalLayer nextDrawable]` when the
+    // drawable pool exhausts. Under guest GPU pressure (wezterm +
+    // vscode, etc.) that block freezes the main run loop, mouse events
+    // stop being dispatched, and the cursor wedges. We pause MTKView's
+    // internal driver and drive `draw()` from this dedicated thread
+    // instead — main thread stays free to service AppKit events at all
+    // times, the renderer thread takes the `nextDrawable` stall when
+    // it happens, and a frame quietly drops instead of the whole UI
+    // hanging. Requires the thread-safe CSMetalRenderer (uses an
+    // internal os_unfair_lock to guard render state).
+    private var renderThread: Thread?
+    private var renderDisplayLink: CADisplayLink?
+
     private var displayConfig: UTMQemuConfigurationDisplay? {
         vmQemuConfig?.displays[id]
     }
@@ -103,17 +118,16 @@ class VMDisplayQemuMetalWindowController: VMDisplayQemuWindowController {
             logger.critical("Failed to create renderer.")
             return
         }
-        // FPS preference: at windowDidLoad time `self.window?.screen` is
-        // often nil because the window hasn't been placed on a screen
-        // yet, so the maxFps branch falls through and MTKView keeps its
-        // default of 60 — even on a 120Hz panel. Use NSScreen.main as the
-        // fallback so we always set something, and re-check when the
-        // window's screen changes (see screenChangedToken below).
-        applyPreferredFps()
         renderer.changeUpscaler(displayConfig?.upscalingFilter.metalSamplerMinMagFilter ?? .linear, downscaler: displayConfig?.downscalingFilter.metalSamplerMinMagFilter ?? .linear)
         vmDisplay?.addRenderer(renderer) // can be nil if primary
         metalView.delegate = renderer
         metalView.inputDelegate = self
+        // Start the dedicated render thread. Must happen after the
+        // delegate is wired up — the first tick will call into the
+        // renderer immediately. FPS preference is applied as part of
+        // start (sets `preferredFrameRateRange` on the CADisplayLink
+        // tied to this screen).
+        startBackgroundRender()
 
         screenChangedToken = NotificationCenter.default.addObserver(forName: NSWindow.didChangeScreenNotification, object: nil, queue: .main) { [weak self] _ in
             // update minSize when we change screens
@@ -125,6 +139,15 @@ class VMDisplayQemuMetalWindowController: VMDisplayQemuWindowController {
             }
             // Re-apply the FPS preference now that we know which screen
             // we're on (windowDidLoad fires before the window is placed).
+            // NB: `NSScreen.displayLink(target:selector:)` returns a link
+            // bound to that screen's vsync; if the user drags the window
+            // to a screen with a different refresh rate, ticks will
+            // continue at the old rate. Updating `preferredFrameRateRange`
+            // doesn't change that. Not a problem for a single-display
+            // host (the daily-driver case); fix is to invalidate the
+            // current link and create a fresh one bound to the new
+            // screen — out of scope for the initial off-main render
+            // patch.
             self?.applyPreferredFps()
         }
 
@@ -135,22 +158,98 @@ class VMDisplayQemuMetalWindowController: VMDisplayQemuWindowController {
         super.windowDidLoad()
     }
 
-    private func applyPreferredFps() {
-        guard let metalView = metalView else { return }
+    /// Target FPS for the render loop. Honours an explicit user override
+    /// (`QEMURendererFPSLimit`); otherwise uses the host display's
+    /// maximum refresh, falling back to `NSScreen.main` because at
+    /// `windowDidLoad` time the window often hasn't been placed on a
+    /// screen yet and `self.window?.screen` is nil.
+    private func preferredFpsTarget() -> Int {
         if rendererFpsLimit > 0 {
-            metalView.preferredFramesPerSecond = rendererFpsLimit
-            return
+            return rendererFpsLimit
         }
-        // window.screen is nil before placement; fall through to NSScreen.main
-        // (typically the same display) instead of leaving MTKView at its
-        // 60Hz default — that floor is the dominant input-lag contributor
-        // on a 120Hz MBP. maximumFramesPerSecond is macOS 12+ only.
         if #available(macOS 12, *) {
-            let maxFps = self.window?.screen?.maximumFramesPerSecond
+            return self.window?.screen?.maximumFramesPerSecond
                 ?? NSScreen.main?.maximumFramesPerSecond
                 ?? 60
-            metalView.preferredFramesPerSecond = maxFps
         }
+        return 60
+    }
+
+    private func applyPreferredFps() {
+        let target = preferredFpsTarget()
+        if #available(macOS 14, *), let link = renderDisplayLink {
+            // CADisplayLink-based path. Range with `minimum < maximum`
+            // lets CoreAnimation drop frames adaptively when the GPU
+            // can't keep up, instead of stalling.
+            link.preferredFrameRateRange = CAFrameRateRange(
+                minimum: max(Float(target) / 2, 30),
+                maximum: Float(target),
+                preferred: Float(target))
+        } else if let metalView = metalView {
+            // Pre-Sonoma fallback: still uses MTKView's internal
+            // main-thread CADisplayLink. The wedge can still happen
+            // here under load, but we have no API to drive MTKView
+            // off-main without macOS 14's NSScreen.displayLink.
+            metalView.preferredFramesPerSecond = target
+        }
+    }
+
+    // MARK: - Background render loop
+
+    /// Pause MTKView's main-thread CADisplayLink and drive `draw()`
+    /// from a dedicated render thread with its own CADisplayLink.
+    /// macOS 14+ only — `NSScreen.displayLink(target:selector:)` is
+    /// the first API that lets us attach a CADisplayLink to a
+    /// non-main run loop without touching CVDisplayLink.
+    private func startBackgroundRender() {
+        guard #available(macOS 14, *) else {
+            applyPreferredFps()
+            return
+        }
+        guard let metalView = metalView else { return }
+        // Disable MTKView's internal driver. MTKView.draw() still
+        // works when called manually in this mode.
+        metalView.isPaused = true
+        metalView.enableSetNeedsDisplay = false
+
+        let screen = self.window?.screen ?? NSScreen.main
+        guard let screen = screen else { return }
+        let link = screen.displayLink(target: self, selector: #selector(renderTick))
+        self.renderDisplayLink = link
+
+        let thread = Thread {
+            Thread.current.name = "UTM.MetalRender"
+            // Attach the CADisplayLink to *this* thread's run loop.
+            // From here, every vblank fires `renderTick` on this thread.
+            link.add(to: RunLoop.current, forMode: .common)
+            while !Thread.current.isCancelled {
+                autoreleasepool {
+                    // Re-check `isCancelled` twice a second so the
+                    // thread exits promptly on window close.
+                    RunLoop.current.run(mode: .common, before: Date(timeIntervalSinceNow: 0.5))
+                }
+            }
+            link.invalidate()
+        }
+        thread.qualityOfService = .userInteractive
+        self.renderThread = thread
+        thread.start()
+
+        applyPreferredFps()
+    }
+
+    @objc private func renderTick() {
+        // `metalView.draw()` ultimately calls `CSMetalRenderer
+        // drawInMTKView:`, which is thread-safe via an internal
+        // os_unfair_lock around its render state.
+        metalView?.draw()
+    }
+
+    private func stopBackgroundRender() {
+        renderDisplayLink?.invalidate()
+        renderDisplayLink = nil
+        renderThread?.cancel()
+        renderThread = nil
     }
 
     // MARK: - Seamless cursor sync
@@ -321,6 +420,10 @@ class VMDisplayQemuMetalWindowController: VMDisplayQemuWindowController {
     }
 
     override func windowWillClose(_ notification: Notification) {
+        // Stop the render thread before tearing down the renderer —
+        // otherwise a tick mid-removeRenderer can call into a freed
+        // CSMetalRenderer.
+        stopBackgroundRender()
         vmDisplay?.removeRenderer(renderer!)
         stopAllCapture()
         if let screenChangedToken = screenChangedToken {
