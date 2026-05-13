@@ -65,8 +65,15 @@ class VMDisplayQemuMetalWindowController: VMDisplayQemuWindowController {
     // it happens, and a frame quietly drops instead of the whole UI
     // hanging. Requires the thread-safe CSMetalRenderer (uses an
     // internal os_unfair_lock to guard render state).
+    //
+    // `renderDisplayLink` is typed `Any?` to keep this class buildable
+    // for the macOS 11.3 deployment target — `CADisplayLink` is
+    // macOS 14+ and a class-scoped property of that type would force
+    // the whole class to be `@available(macOS 14, *)`. The actual
+    // value is always either nil or a `CADisplayLink`; cast at the
+    // use site.
     private var renderThread: Thread?
-    private var renderDisplayLink: CADisplayLink?
+    private var renderDisplayLink: Any?
 
     private var displayConfig: UTMQemuConfigurationDisplay? {
         vmQemuConfig?.displays[id]
@@ -177,7 +184,7 @@ class VMDisplayQemuMetalWindowController: VMDisplayQemuWindowController {
 
     private func applyPreferredFps() {
         let target = preferredFpsTarget()
-        if #available(macOS 14, *), let link = renderDisplayLink {
+        if #available(macOS 14, *), let link = renderDisplayLink as? CADisplayLink {
             // CADisplayLink-based path. Range with `minimum < maximum`
             // lets CoreAnimation drop frames adaptively when the GPU
             // can't keep up, instead of stalling.
@@ -223,7 +230,11 @@ class VMDisplayQemuMetalWindowController: VMDisplayQemuWindowController {
             // From here, every vblank fires `renderTick` on this thread.
             link.add(to: RunLoop.current, forMode: .common)
             while !Thread.current.isCancelled {
-                autoreleasepool {
+                // `autoreleasepool` returns whatever the closure
+                // returns (here `Bool` from RunLoop.run); we don't
+                // care, hence the `_`. The pool drains every tick so
+                // per-frame autoreleased objects don't accumulate.
+                _ = autoreleasepool {
                     // Re-check `isCancelled` twice a second so the
                     // thread exits promptly on window close.
                     RunLoop.current.run(mode: .common, before: Date(timeIntervalSinceNow: 0.5))
@@ -246,7 +257,9 @@ class VMDisplayQemuMetalWindowController: VMDisplayQemuWindowController {
     }
 
     private func stopBackgroundRender() {
-        renderDisplayLink?.invalidate()
+        if #available(macOS 14, *), let link = renderDisplayLink as? CADisplayLink {
+            link.invalidate()
+        }
         renderDisplayLink = nil
         renderThread?.cancel()
         renderThread = nil
