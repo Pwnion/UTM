@@ -53,27 +53,27 @@ class VMDisplayQemuMetalWindowController: VMDisplayQemuWindowController {
     private var ctrlKeyDown: Bool = false
     private var screenChangedToken: Any?
 
-    // Background render loop. MTKView's default mode runs `[MTKView draw]`
-    // on the main thread via an internal CADisplayLink — and `draw`
+    // Off-main render loop. MTKView's default mode runs `[MTKView draw]`
+    // on the main thread via an internal display link — and `draw`
     // ultimately blocks in `[CAMetalLayer nextDrawable]` when the
     // drawable pool exhausts. Under guest GPU pressure (wezterm +
     // vscode, etc.) that block freezes the main run loop, mouse events
     // stop being dispatched, and the cursor wedges. We pause MTKView's
-    // internal driver and drive `draw()` from this dedicated thread
+    // internal driver and drive `draw()` from a CVDisplayLink callback
     // instead — main thread stays free to service AppKit events at all
     // times, the renderer thread takes the `nextDrawable` stall when
     // it happens, and a frame quietly drops instead of the whole UI
     // hanging. Requires the thread-safe CSMetalRenderer (uses an
     // internal os_unfair_lock to guard render state).
     //
-    // `renderDisplayLink` is typed `Any?` to keep this class buildable
-    // for the macOS 11.3 deployment target — `CADisplayLink` is
-    // macOS 14+ and a class-scoped property of that type would force
-    // the whole class to be `@available(macOS 14, *)`. The actual
-    // value is always either nil or a `CADisplayLink`; cast at the
-    // use site.
-    private var renderThread: Thread?
-    private var renderDisplayLink: Any?
+    // CVDisplayLink (rather than the macOS 14 CADisplayLink port) is
+    // used because the new CADisplayLink port has subtle run-loop
+    // issues on Apple Silicon — the source never lands in the
+    // requested mode, run(mode:before:) returns immediately each
+    // iteration, callback never fires. CVDisplayLink is deprecated in
+    // macOS 15 but still functional; we'll migrate to whatever Apple
+    // replaces it with when the new CADisplayLink path stabilises.
+    private var cvDisplayLink: CVDisplayLink?
 
     private var displayConfig: UTMQemuConfigurationDisplay? {
         vmQemuConfig?.displays[id]
@@ -144,18 +144,16 @@ class VMDisplayQemuMetalWindowController: VMDisplayQemuWindowController {
                !isDisplaySizeDynamic {
                 window.contentMinSize = contentMinSize(in: window, for: displaySize)
             }
-            // Re-apply the FPS preference now that we know which screen
-            // we're on (windowDidLoad fires before the window is placed).
-            // NB: `NSScreen.displayLink(target:selector:)` returns a link
-            // bound to that screen's vsync; if the user drags the window
-            // to a screen with a different refresh rate, ticks will
-            // continue at the old rate. Updating `preferredFrameRateRange`
-            // doesn't change that. Not a problem for a single-display
-            // host (the daily-driver case); fix is to invalidate the
-            // current link and create a fresh one bound to the new
-            // screen — out of scope for the initial off-main render
-            // patch.
-            self?.applyPreferredFps()
+            // Re-bind CVDisplayLink to the new screen so vsync ticks
+            // match the destination display's refresh rate. Lossless:
+            // CVDisplayLinkSetCurrentCGDisplay can be called on a
+            // running link.
+            if let self = self,
+               let link = self.cvDisplayLink,
+               let screen = self.window?.screen,
+               let displayID = screen.deviceDescription[NSDeviceDescriptionKey("NSScreenNumber")] as? CGDirectDisplayID {
+                CVDisplayLinkSetCurrentCGDisplay(link, displayID)
+            }
         }
 
         if isSecondary && isDisplaySizeDynamic, let window = window {
@@ -182,94 +180,61 @@ class VMDisplayQemuMetalWindowController: VMDisplayQemuWindowController {
         return 60
     }
 
-    private func applyPreferredFps() {
-        let target = preferredFpsTarget()
-        if #available(macOS 14, *), let link = renderDisplayLink as? CADisplayLink {
-            // CADisplayLink-based path. Range with `minimum < maximum`
-            // lets CoreAnimation drop frames adaptively when the GPU
-            // can't keep up, instead of stalling.
-            link.preferredFrameRateRange = CAFrameRateRange(
-                minimum: max(Float(target) / 2, 30),
-                maximum: Float(target),
-                preferred: Float(target))
-        } else if let metalView = metalView {
-            // Pre-Sonoma fallback: still uses MTKView's internal
-            // main-thread CADisplayLink. The wedge can still happen
-            // here under load, but we have no API to drive MTKView
-            // off-main without macOS 14's NSScreen.displayLink.
-            metalView.preferredFramesPerSecond = target
-        }
-    }
+    // MARK: - Off-main render loop
 
-    // MARK: - Background render loop
-
-    /// Pause MTKView's main-thread CADisplayLink and drive `draw()`
-    /// from a dedicated render thread with its own CADisplayLink.
-    /// macOS 14+ only — `NSScreen.displayLink(target:selector:)` is
-    /// the first API that lets us attach a CADisplayLink to a
-    /// non-main run loop without touching CVDisplayLink.
+    /// Pause MTKView's main-thread display link and drive `draw()`
+    /// from a CVDisplayLink callback running on CV's private thread.
+    /// MTKView.draw() ultimately calls CSMetalRenderer's drawInMTKView:
+    /// which is thread-safe (os_unfair_lock-guarded render state).
     private func startBackgroundRender() {
-        guard #available(macOS 14, *) else {
-            applyPreferredFps()
-            return
-        }
         guard let metalView = metalView else { return }
         // Disable MTKView's internal driver. MTKView.draw() still
         // works when called manually in this mode.
         metalView.isPaused = true
         metalView.enableSetNeedsDisplay = false
 
-        // Snapshot the screen reference up-front so the thread closure
-        // doesn't have to hop back to main to read self.window.
-        let screen = self.window?.screen ?? NSScreen.main
-        guard let screen = screen else { return }
-
-        let thread = Thread { [weak self] in
-            Thread.current.name = "UTM.MetalRender"
-            // Create the CADisplayLink *on this thread*. Cross-thread
-            // creation + add seems to leave the link with no source
-            // installed; doing both here on the same run loop fires
-            // ticks reliably.
-            guard #available(macOS 14, *), let self = self else { return }
-            let link = screen.displayLink(target: self, selector: #selector(self.renderTick))
-            self.renderDisplayLink = link
-            link.add(to: RunLoop.current, forMode: .common)
-            // Apply the FPS preference now that the link exists.
-            DispatchQueue.main.async { [weak self] in
-                self?.applyPreferredFps()
-            }
-            while !Thread.current.isCancelled {
-                // `autoreleasepool` returns whatever the closure
-                // returns (here `Bool` from RunLoop.run); we don't
-                // care, hence the `_`. The pool drains every tick so
-                // per-frame autoreleased objects don't accumulate.
-                _ = autoreleasepool {
-                    // Re-check `isCancelled` twice a second so the
-                    // thread exits promptly on window close.
-                    RunLoop.current.run(mode: .common, before: Date(timeIntervalSinceNow: 0.5))
-                }
-            }
-            link.invalidate()
+        var link: CVDisplayLink?
+        let status = CVDisplayLinkCreateWithActiveCGDisplays(&link)
+        guard status == kCVReturnSuccess, let link = link else {
+            // Fall back to MTKView's internal display link. The cursor
+            // wedge can still occur on this path, but at least the VM
+            // draws.
+            metalView.isPaused = false
+            return
         }
-        thread.qualityOfService = .userInteractive
-        self.renderThread = thread
-        thread.start()
-    }
+        self.cvDisplayLink = link
 
-    @objc private func renderTick() {
-        // `metalView.draw()` ultimately calls `CSMetalRenderer
-        // drawInMTKView:`, which is thread-safe via an internal
-        // os_unfair_lock around its render state.
-        metalView?.draw()
+        // Output callback: runs on CVDisplayLink's private thread. The
+        // user pointer is an unretained `self`, so don't outlive the
+        // window — `stopBackgroundRender` (called from windowWillClose)
+        // stops the link before the controller is freed.
+        let callback: CVDisplayLinkOutputCallback = { _, _, _, _, _, userInfoPtr in
+            guard let userInfoPtr = userInfoPtr else { return kCVReturnSuccess }
+            let controller = Unmanaged<VMDisplayQemuMetalWindowController>
+                .fromOpaque(userInfoPtr).takeUnretainedValue()
+            // metalView property access from a non-main thread: the
+            // ivar storage is read once; if it's been set to nil by
+            // main during teardown, we just no-op the frame.
+            controller.metalView?.draw()
+            return kCVReturnSuccess
+        }
+        CVDisplayLinkSetOutputCallback(link, callback, Unmanaged.passUnretained(self).toOpaque())
+
+        // Bind to the screen the window's currently on so vsync ticks
+        // match the display refresh rate. If we can't resolve a CGDirectDisplayID,
+        // the link falls back to all-active-displays from create.
+        if let screen = self.window?.screen ?? NSScreen.main,
+           let displayID = screen.deviceDescription[NSDeviceDescriptionKey("NSScreenNumber")] as? CGDirectDisplayID {
+            CVDisplayLinkSetCurrentCGDisplay(link, displayID)
+        }
+        CVDisplayLinkStart(link)
     }
 
     private func stopBackgroundRender() {
-        if #available(macOS 14, *), let link = renderDisplayLink as? CADisplayLink {
-            link.invalidate()
+        if let link = cvDisplayLink {
+            CVDisplayLinkStop(link)
         }
-        renderDisplayLink = nil
-        renderThread?.cancel()
-        renderThread = nil
+        cvDisplayLink = nil
     }
 
     // MARK: - Seamless cursor sync
