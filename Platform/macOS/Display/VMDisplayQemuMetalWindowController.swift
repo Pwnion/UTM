@@ -219,16 +219,25 @@ class VMDisplayQemuMetalWindowController: VMDisplayQemuWindowController {
         metalView.isPaused = true
         metalView.enableSetNeedsDisplay = false
 
+        // Snapshot the screen reference up-front so the thread closure
+        // doesn't have to hop back to main to read self.window.
         let screen = self.window?.screen ?? NSScreen.main
         guard let screen = screen else { return }
-        let link = screen.displayLink(target: self, selector: #selector(renderTick))
-        self.renderDisplayLink = link
 
-        let thread = Thread {
+        let thread = Thread { [weak self] in
             Thread.current.name = "UTM.MetalRender"
-            // Attach the CADisplayLink to *this* thread's run loop.
-            // From here, every vblank fires `renderTick` on this thread.
+            // Create the CADisplayLink *on this thread*. Cross-thread
+            // creation + add seems to leave the link with no source
+            // installed; doing both here on the same run loop fires
+            // ticks reliably.
+            guard #available(macOS 14, *), let self = self else { return }
+            let link = screen.displayLink(target: self, selector: #selector(self.renderTick))
+            self.renderDisplayLink = link
             link.add(to: RunLoop.current, forMode: .common)
+            // Apply the FPS preference now that the link exists.
+            DispatchQueue.main.async { [weak self] in
+                self?.applyPreferredFps()
+            }
             while !Thread.current.isCancelled {
                 // `autoreleasepool` returns whatever the closure
                 // returns (here `Bool` from RunLoop.run); we don't
@@ -245,8 +254,6 @@ class VMDisplayQemuMetalWindowController: VMDisplayQemuWindowController {
         thread.qualityOfService = .userInteractive
         self.renderThread = thread
         thread.start()
-
-        applyPreferredFps()
     }
 
     @objc private func renderTick() {
