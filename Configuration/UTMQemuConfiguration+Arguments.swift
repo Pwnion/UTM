@@ -207,6 +207,20 @@ import Virtualization // for getting network interfaces
             "streaming-video=filter"
         }
         "gl=\(glBackend)"
+        // Disable agent-mediated mouse mode. When the guest's
+        // spice-vdagent is running and announces mouse capability,
+        // SPICE switches into agent-mouse mode and routes pointer
+        // events through the agent path. That path wedges under
+        // sustained guest GPU load (chrome / vscode rendering at
+        // 120fps in a Wayland compositor): events queue but stop
+        // arriving at /dev/input. Keyboard, clipboard, file transfer
+        // continue to work because they're on different SPICE
+        // channels / code paths. With agent-mouse=off the SPICE
+        // server ignores the agent's mouse advertisement and always
+        // uses direct injection into the configured input devices
+        // (usb-tablet for absolute positioning) — which is rock
+        // solid under any guest load.
+        "agent-mouse=off"
         f()
         f("-chardev")
         if isRemoteSpice {
