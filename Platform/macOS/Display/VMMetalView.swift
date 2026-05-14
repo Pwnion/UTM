@@ -35,26 +35,30 @@ class VMMetalView: MTKView {
             // invalidateCursorRects only rebuilds the rects for the next
             // mouse-enter event — the visible cursor doesn't change until
             // then. Set() it now if we're under the cursor.
-            if !isMouseCaptured && isMouseInWindow {
+            // Assert the mirror in both captured and uncaptured modes.
+            // Captured: guest framebuffer sprite is inhibited (wings),
+            // so the mirror is the only visible cursor. Uncaptured:
+            // the mirror replaces macOS's default arrow with the
+            // guest's contextual shape.
+            if isMouseInWindow {
                 (displayCursor ?? NSCursor.arrow).set()
             }
         }
     }
 
     override func cursorUpdate(with event: NSEvent) {
-        if isMouseCaptured {
-            // In captured mode the cursor is hidden — let super handle.
-            super.cursorUpdate(with: event)
-            return
-        }
+        // Always assert the mirror — see displayCursor.didSet for why
+        // both capture modes need it visible.
         (displayCursor ?? NSCursor.arrow).set()
     }
 
     override func resetCursorRects() {
         super.resetCursorRects()
-        if !isMouseCaptured {
-            addCursorRect(bounds, cursor: displayCursor ?? NSCursor.arrow)
-        }
+        // Cover the whole view with the mirror in both capture modes
+        // (uncaptured uses it instead of the system arrow; captured
+        // has no other visible cursor since the framebuffer sprite is
+        // inhibited).
+        addCursorRect(bounds, cursor: displayCursor ?? NSCursor.arrow)
     }
     @Setting("HandleInitialClick") private var isHandleInitialClick: Bool = false
     @Setting("IsCtrlCmdSwapped") private var isCtrlCmdSwapped = false
@@ -91,13 +95,13 @@ class VMMetalView: MTKView {
     
     override func becomeFirstResponder() -> Bool {
         isFirstResponder = true
-        // Only hide the macOS cursor when actually captured. Otherwise
-        // keeping it visible over the VM view gives the user the host's
-        // zero-lag cursor instead of the SPICE-pipeline-lagged guest
-        // sprite, which is the dominant source of perceived cursor lag.
-        if isMouseInWindow && isMouseCaptured {
-            NSCursor.tryHide()
-        }
+        // Don't hide NSCursor. The wings cursor-mirror code uses
+        // displayCursor (an NSCursor whose image matches the guest's
+        // cursor shape, polled at 30Hz from CSCursor) as the user-
+        // visible cursor in both captured and uncaptured modes. Hiding
+        // NSCursor would make the mirror invisible too — and the guest
+        // framebuffer sprite is inhibited by the wings sync, so the
+        // user would see no cursor at all.
         return super.becomeFirstResponder()
     }
     
@@ -130,12 +134,7 @@ class VMMetalView: MTKView {
     override func mouseEntered(with event: NSEvent) {
         logger.debug("mouse entered (first responder: \(isFirstResponder))")
         isMouseInWindow = true
-        // Same logic as becomeFirstResponder: only hide host cursor when
-        // captured. In uncaptured mode the host cursor is the snappy one
-        // we want to keep visible.
-        if isFirstResponder && isMouseCaptured {
-            NSCursor.tryHide()
-        }
+        // Don't tryHide here either — see becomeFirstResponder.
     }
     
     override func mouseExited(with event: NSEvent) {
@@ -347,17 +346,17 @@ extension VMMetalView {
         CGAssociateMouseAndMouseCursorPosition(0)
         CGWarpMouseCursorPosition(screenCenter ?? .zero)
         isMouseCaptured = true
-        NSCursor.tryHide()
+        // Don't tryHide: the displayCursor mirror is what we want
+        // visible (it matches the guest cursor shape). Hiding NSCursor
+        // would hide it too, leaving the user with no visible cursor
+        // since the guest framebuffer sprite is inhibited by wings.
         CGSSetGlobalHotKeyOperatingMode(CGSMainConnectionID(), .disable)
     }
-    
+
     func releaseMouse() {
         logger.trace("release cursor")
         CGAssociateMouseAndMouseCursorPosition(1)
         isMouseCaptured = false
-        if !isMouseInWindow {
-            NSCursor.tryUnhide()
-        }
         CGSSetGlobalHotKeyOperatingMode(CGSMainConnectionID(), .enable)
     }
 }
