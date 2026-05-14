@@ -297,15 +297,18 @@ class VMMetalView: MTKView {
     
     override func mouseMoved(with event: NSEvent) {
         logger.trace("mouse moved: \(event.deltaX), \(event.deltaY)")
-        if isMouseCaptured {
-            inputDelegate?.mouseMove(relativePoint: CGPoint(x: event.deltaX, y: -event.deltaY),
-                                     buttonMask: NSEvent.pressedMouseButtons.inputButtons())
-        } else {
-            let location = event.locationInWindow
-            let converted = convert(location, from: nil)
-            inputDelegate?.mouseMove(absolutePoint: converted,
-                                     buttonMask: NSEvent.pressedMouseButtons.inputButtons())
-        }
+        // Always use absolute coordinates regardless of capture state.
+        // Captured mode is for keystroke passthrough (Cmd+Q etc); mouse
+        // motion stays absolute because our SPICE flags include
+        // agent-mouse=off, which means SPICE direct-injects into the
+        // usb-tablet (absolute-only). Relative deltas would have
+        // nowhere to land. The host cursor's actual location can be
+        // CGWarp'd back to centre periodically if we ever need infinite
+        // motion, but with single-display VMs the absolute coords work.
+        let location = event.locationInWindow
+        let converted = convert(location, from: nil)
+        inputDelegate?.mouseMove(absolutePoint: converted,
+                                 buttonMask: NSEvent.pressedMouseButtons.inputButtons())
     }
     
     override func scrollWheel(with event: NSEvent) {
@@ -343,19 +346,23 @@ extension VMMetalView {
     
     func captureMouse() {
         logger.trace("capture cursor")
-        CGAssociateMouseAndMouseCursorPosition(0)
-        CGWarpMouseCursorPosition(screenCenter ?? .zero)
+        // Don't CGAssociateMouseAndMouseCursorPosition(0) or warp the
+        // cursor. Our SPICE config uses agent-mouse=off + usb-tablet,
+        // so mouse input is absolute-only — the host cursor's actual
+        // screen position is what we forward to the guest. Decoupling
+        // it from the mouse breaks event.locationInWindow.
+        //
+        // Capture mode here is really "keystroke passthrough mode":
+        // CGSSetGlobalHotKeyOperatingMode(.disable) stops macOS from
+        // intercepting Cmd+Q, Cmd+Tab, Cmd+Space etc. The mouse stays
+        // free-roaming and absolute, with the wings displayCursor
+        // mirror as the visible pointer.
         isMouseCaptured = true
-        // Don't tryHide: the displayCursor mirror is what we want
-        // visible (it matches the guest cursor shape). Hiding NSCursor
-        // would hide it too, leaving the user with no visible cursor
-        // since the guest framebuffer sprite is inhibited by wings.
         CGSSetGlobalHotKeyOperatingMode(CGSMainConnectionID(), .disable)
     }
 
     func releaseMouse() {
         logger.trace("release cursor")
-        CGAssociateMouseAndMouseCursorPosition(1)
         isMouseCaptured = false
         CGSSetGlobalHotKeyOperatingMode(CGSMainConnectionID(), .enable)
     }
