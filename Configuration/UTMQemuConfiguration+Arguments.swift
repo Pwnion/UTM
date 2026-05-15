@@ -971,15 +971,37 @@ import Virtualization // for getting network interfaces
         } else {
             f("-usb")
         }
+        // On `virt` (aarch64) machines, use virtio-input devices instead
+        // of usb-kbd/usb-tablet/usb-mouse. usb-kbd's USB-HID descriptor
+        // sets bInterval = 7 (= 2^(7-1) * 125us = 8 ms — verified in
+        // QEMU's hw/usb/dev-hid.c). The xHCI host controller polls the
+        // device at that interval, so each keystroke waits 0-8ms (avg
+        // 4ms) for the next poll before reaching the guest. usb-tablet
+        // uses bInterval=4 (1ms) which is fine, but moving everything
+        // to virtio-input keeps the input path consistent: virtio uses
+        // a virtqueue with no polling at all, just an event-driven
+        // notification.
+        //
+        // Other targets keep usb-* — virtio-input requires a virtio
+        // bus, which legacy machines (PC-compat, classic Macs) don't
+        // expose. The `virt` aarch64 machine type does.
+        let useVirtioInput = system.target.rawValue.hasPrefix("virt")
         if !isClassicMacNewWorld {
             f("-device")
-            f("usb-tablet,bus=usb-bus.0")
+            f(useVirtioInput ? "virtio-tablet-pci" : "usb-tablet,bus=usb-bus.0")
         }
         if !qemu.hasPS2Controller {
-            f("-device")
-            f("usb-mouse,bus=usb-bus.0")
-            f("-device")
-            f("usb-kbd,bus=usb-bus.0")
+            if useVirtioInput {
+                f("-device")
+                f("virtio-mouse-pci")
+                f("-device")
+                f("virtio-keyboard-pci")
+            } else {
+                f("-device")
+                f("usb-mouse,bus=usb-bus.0")
+                f("-device")
+                f("usb-kbd,bus=usb-bus.0")
+            }
         }
         #if WITH_USB
         let maxDevices = input.maximumUsbShare
